@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lagged-backtest"
+version = "0.1.0"
+description = "A small auditable backtester with explicit execution lag and trading costs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Wang Haoxuan"}]
+dependencies = []
+
+[project.scripts]
+lagged-backtest = "lagged_backtest.cli:main"
+
+[project.urls]
+Repository = "https://github.com/jinxuansama/lagged-backtest"
+Issues = "https://github.com/jinxuansama/lagged-backtest/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
