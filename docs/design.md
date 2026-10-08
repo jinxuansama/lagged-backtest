@@ -7,14 +7,16 @@ for signal k takes place at close k+1; the position earns interval k+1→k+2.
 
 | Quantity | Formula |
 | --- | --- |
-| Asset return | r_t = P_t / P_(t-1) - 1 |
+| Price multiplier | q_t = P_t / P_(t-1) |
+| Asset return | r_t = q_t - 1 |
 | Previous drifted end weight | h_(t-1) |
 | Turnover | u_t = abs(w_t - h_(t-1)) |
 | Fee fraction | f_t = u_t × cost_bps / 10000 |
 | Gross portfolio return | g_t = w_t × r_t |
-| Net portfolio return | n_t = (1-f_t) × (1+g_t) - 1 |
-| Wealth | V_t = V_(t-1) × (1+n_t) |
-| Drifted end weight | h_t = w_t × (1+r_t) / (1+g_t) |
+| Gross portfolio multiplier | m_t = (1-w_t) + w_t × q_t |
+| Net portfolio return | n_t = (1-f_t) × m_t - 1 |
+| Wealth | V_t = V_(t-1) × (1-f_t) × m_t |
+| Drifted end weight | h_t = w_t × q_t / m_t |
 
 Fees reduce wealth proportionally before the interval. Turnover is measured
 against the drifted pretrade fraction; target allocation occurs after fees.
@@ -22,10 +24,19 @@ This is an abstract accounting convention, not an exchange fill simulator.
 There is no forced terminal sale. Buy-and-hold is `P_t / P_0` without costs,
 so it is a labelled frictionless baseline, not a like-for-like net strategy.
 
+Wealth and drift use multipliers directly: subtracting and then adding one
+can erase a small positive price ratio. A reported return may round to -1
+while its directly computed wealth remains positive. Adjacent price ratios,
+buy-and-hold ratios, and wealth must remain finite and strictly positive in
+floating-point arithmetic; unrepresentable values raise `ValueError`, even
+when the strategy holds cash. These checks do not change the timing or fee
+convention.
+
 All post-initial intervals, including initial cash intervals, enter metrics.
 Annualized return is `exp(log(V_last)*periods_per_year/N)-1`; annualized
 volatility is sample standard deviation × sqrt(periods_per_year); Sharpe
-assumes zero risk-free rate. Undefined values are null. Drawdown includes
+assumes zero risk-free rate. Undefined or non-finite annualized metrics are
+null. Drawdown includes
 the initial wealth point. N is the number of return intervals, not rows.
 
 The moving-average signal is one when the current price is strictly above
