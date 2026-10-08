@@ -49,3 +49,9 @@ are permitted; the caller chooses an appropriate annualization assumption.
 Input signal causality, adjusted prices, and data provenance remain the
 caller's responsibility. Future-shock regression tests verify that the
 built-in signal generator and backtester preserve historical prefixes.
+
+CSV parsing uses the standard library's strict mode: unterminated quoted
+fields and characters after a closing quote are rejected. Properly quoted
+headers and fields containing commas, escaped quotes, or line breaks remain
+supported. CSV parser errors raise `ValueError` with an `invalid CSV` message;
+the CLI exits 2 without writing a report.

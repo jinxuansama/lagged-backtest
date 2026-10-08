@@ -126,12 +126,15 @@ def from_csv(path, *, window=None, **options):
     path = Path(path)
     blob = path.read_bytes()
     import io
-    reader = csv.DictReader(io.StringIO(blob.decode("utf-8-sig"), newline=""))
-    fields = reader.fieldnames or []
+    reader = csv.DictReader(io.StringIO(blob.decode("utf-8-sig"), newline=""), strict=True)
     required = {"date", "close"} | ({"signal"} if window is None else set())
-    if len(set(fields)) != len(fields) or not required <= set(fields):
-        raise ValueError(f"CSV requires unique headers including {sorted(required)}")
-    records = list(reader)
+    try:
+        fields = reader.fieldnames or []
+        if len(set(fields)) != len(fields) or not required <= set(fields):
+            raise ValueError(f"CSV requires unique headers including {sorted(required)}")
+        records = list(reader)
+    except csv.Error as exc:
+        raise ValueError(f"invalid CSV: {exc}") from None
     if any(None in r or any(v is None for v in r.values()) for r in records):
         raise ValueError("CSV row width does not match header width")
     prices = [r["close"] for r in records]

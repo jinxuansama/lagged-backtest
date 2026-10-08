@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from lagged_backtest.cli import main
-from lagged_backtest.core import backtest, moving_average_signals
+from lagged_backtest.core import backtest, from_csv, moving_average_signals
 
 
 class BacktestTests(unittest.TestCase):
@@ -117,6 +117,51 @@ class BacktestTests(unittest.TestCase):
     def test_lag_exceeds_history(self):
         r = backtest(self.dates, [1, 2, 3, 4], [1]*4, lag=10)
         self.assertEqual(r["metrics"]["total_return"], 0)
+
+
+class CsvInputTests(unittest.TestCase):
+    malformed_inputs = (
+        'date,close,signal\n2026-01-01,100,0\n2026-01-02,"10"1,1\n',
+        'date,close,signal\n2026-01-01,100,0\n2026-01-02,101,"1',
+        '"date"x,close,signal\n2026-01-01,100,0\n2026-01-02,101,1\n',
+    )
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = Path(directory.name) / "prices.csv"
+
+    def test_malformed_quoting_raises_contextual_value_error(self):
+        for content in self.malformed_inputs:
+            with self.subTest(content=content):
+                self.path.write_text(content, encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "invalid CSV"):
+                    from_csv(self.path)
+
+    def test_malformed_quoting_cli_exits_two_without_writing_report(self):
+        output = self.path.with_suffix(".json")
+        for content in self.malformed_inputs:
+            with self.subTest(content=content):
+                self.path.write_text(content, encoding="utf-8")
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    code = main([str(self.path), "--output", str(output)])
+                self.assertEqual(code, 2)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertIn("invalid CSV", stderr.getvalue())
+                self.assertFalse(output.exists())
+
+    def test_valid_quoted_and_multiline_fields_remain_supported(self):
+        for content in (
+            '"date","close","signal"\n"2026-01-01","100","0"\n"2026-01-02","101","1"\n',
+            'date,close,signal,notes\r\n2026-01-01,"100",0,"first, line\r\nsecond line"\r\n'
+            '2026-01-02,101,"1","a ""quoted"" note"\r\n',
+        ):
+            with self.subTest(content=content):
+                self.path.write_text(content, encoding="utf-8")
+                report = from_csv(self.path)
+                self.assertEqual([row["close"] for row in report["rows"]], [100, 101])
+                self.assertEqual([row["signal"] for row in report["rows"]], [0, 1])
 
 
 class CliNumericalTests(unittest.TestCase):

@@ -8,6 +8,8 @@
   serializable; add numerical boundary and CLI regression tests.
 - Retry standard deviation with scaled returns when Python 3.10 overflows
   the intermediate variance, preserving finite volatility and Sharpe values.
+- Reject malformed quoted CSV fields instead of silently accepting altered
+  values, while preserving valid quoted and multiline fields.
 
 ## 0.1.0 — 2026-09-30
 
