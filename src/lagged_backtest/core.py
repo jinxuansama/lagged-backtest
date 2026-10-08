@@ -96,7 +96,12 @@ def backtest(dates, prices, signals, *, lag=2, cost_bps=10.0, periods_per_year=2
                             position=position, turnover=turnover, cost_fraction=fee,
                             gross_return=gross, net_return=net, equity=equity,
                             buy_hold_equity=buy_hold_equity))
-    deviation = statistics.stdev(returns) if len(returns) >= 2 else None
+    try:
+        deviation = statistics.stdev(returns) if len(returns) >= 2 else None
+    except OverflowError:
+        # Python 3.10 can overflow the variance even when stdev is finite.
+        scale = max(abs(value) for value in returns)
+        deviation = statistics.stdev([value / scale for value in returns]) * scale
     sharpe = statistics.mean(returns) / deviation * math.sqrt(periods_per_year) if deviation else None
     if sharpe is not None and not math.isfinite(sharpe):
         sharpe = None

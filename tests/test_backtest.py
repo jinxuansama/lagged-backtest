@@ -3,8 +3,10 @@ import io
 import json
 import math
 from pathlib import Path
+import statistics
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from lagged_backtest.cli import main
 from lagged_backtest.core import backtest, moving_average_signals
@@ -66,6 +68,23 @@ class BacktestTests(unittest.TestCase):
         self.assertIsNone(r["metrics"]["annualized_volatility"])
         self.assertTrue(math.isfinite(r["metrics"]["sharpe_zero_risk_free"]))
         json.dumps(r, allow_nan=False)
+
+    def test_representable_deviation_survives_variance_overflow(self):
+        # Python 3.10 converts variance to float before taking its square root.
+        def variance_first_stdev(data):
+            return math.sqrt(statistics.variance(data))
+
+        for price in (1e200, 1e308):
+            with self.subTest(price=price), patch(
+                "lagged_backtest.core.statistics.stdev", side_effect=variance_first_stdev
+            ):
+                r = backtest(self.dates[:3], [1, price, price], [1]*3,
+                             lag=1, cost_bps=0, periods_per_year=1)
+                self.assertTrue(math.isclose(r["metrics"]["annualized_volatility"],
+                                             price / math.sqrt(2), rel_tol=1e-15))
+                self.assertAlmostEqual(r["metrics"]["sharpe_zero_risk_free"],
+                                       1 / math.sqrt(2))
+                json.dumps(r, allow_nan=False)
 
     def test_future_change_does_not_change_past(self):
         a_prices, b_prices = [100, 110, 120, 130], [100, 110, 120, 1]
