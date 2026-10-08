@@ -64,19 +64,27 @@ def backtest(dates, prices, signals, *, lag=2, cost_bps=10.0, periods_per_year=2
     returns, records = [], []
     total_turnover = 0.0
     for t in range(len(prices)):
+        price_ratio = prices[t] / prices[t-1] if t else 1.0
+        if not math.isfinite(price_ratio) or price_ratio <= 0:
+            raise ValueError("price ratio overflow/underflow; exceeds floating-point range")
+        buy_hold_equity = prices[t] / prices[0]
+        if not math.isfinite(buy_hold_equity) or buy_hold_equity <= 0:
+            raise ValueError("buy-and-hold ratio overflow/underflow; exceeds floating-point range")
         if t == 0:
             position = turnover = fee = gross = net = 0.0
         else:
             position = signals[t-lag] if t >= lag else 0.0
             turnover = abs(position - end_weight)
             fee = turnover * cost_bps / 10000
-            asset_return = prices[t] / prices[t-1] - 1
-            gross = position * asset_return
-            net = (1-fee) * (1+gross) - 1
-            equity *= (1-fee) * (1+gross)
+            gross = position * (price_ratio - 1)
+            # Preserve tiny positive ratios that would disappear in 1 + return.
+            growth = (1-position) + position * price_ratio
+            net_growth = (1-fee) * growth
+            net = net_growth - 1
+            equity *= net_growth
             if not math.isfinite(equity) or equity <= 0:
                 raise ValueError("equity overflow/underflow; rescale input or shorten the run")
-            end_weight = position * (1+asset_return) / (1+gross)
+            end_weight = position * price_ratio / growth
             # Clamp round-off only; target positions are constrained to [0,1].
             end_weight = min(1.0, max(0.0, end_weight))
             returns.append(net)
@@ -87,9 +95,19 @@ def backtest(dates, prices, signals, *, lag=2, cost_bps=10.0, periods_per_year=2
                             signal_index=t-lag if t >= lag and t > 0 else None,
                             position=position, turnover=turnover, cost_fraction=fee,
                             gross_return=gross, net_return=net, equity=equity,
-                            buy_hold_equity=prices[t] / prices[0]))
-    deviation = statistics.stdev(returns) if len(returns) >= 2 else None
+                            buy_hold_equity=buy_hold_equity))
+    try:
+        deviation = statistics.stdev(returns) if len(returns) >= 2 else None
+    except OverflowError:
+        # Python 3.10 can overflow the variance even when stdev is finite.
+        scale = max(abs(value) for value in returns)
+        deviation = statistics.stdev([value / scale for value in returns]) * scale
     sharpe = statistics.mean(returns) / deviation * math.sqrt(periods_per_year) if deviation else None
+    if sharpe is not None and not math.isfinite(sharpe):
+        sharpe = None
+    volatility = deviation * math.sqrt(periods_per_year) if deviation is not None else None
+    if volatility is not None and not math.isfinite(volatility):
+        volatility = None
     try:
         annualized = math.expm1(math.log(equity) * periods_per_year / len(returns))
     except OverflowError:
@@ -99,7 +117,7 @@ def backtest(dates, prices, signals, *, lag=2, cost_bps=10.0, periods_per_year=2
     return dict(version=1, assumptions=dict(lag=lag, cost_bps=cost_bps, periods_per_year=periods_per_year,
                 cash_return=0, terminal_liquidation=False, fees="proportional at rebalance", annualization="by bar count"),
                 metrics=dict(total_return=equity-1, annualized_return=annualized,
-                annualized_volatility=deviation*math.sqrt(periods_per_year) if deviation is not None else None,
+                annualized_volatility=volatility,
                 sharpe_zero_risk_free=sharpe, max_drawdown=drawdown,
                 total_turnover=total_turnover, return_periods=len(returns)), rows=records)
 
@@ -108,12 +126,15 @@ def from_csv(path, *, window=None, **options):
     path = Path(path)
     blob = path.read_bytes()
     import io
-    reader = csv.DictReader(io.StringIO(blob.decode("utf-8-sig"), newline=""))
-    fields = reader.fieldnames or []
+    reader = csv.DictReader(io.StringIO(blob.decode("utf-8-sig"), newline=""), strict=True)
     required = {"date", "close"} | ({"signal"} if window is None else set())
-    if len(set(fields)) != len(fields) or not required <= set(fields):
-        raise ValueError(f"CSV requires unique headers including {sorted(required)}")
-    records = list(reader)
+    try:
+        fields = reader.fieldnames or []
+        if len(set(fields)) != len(fields) or not required <= set(fields):
+            raise ValueError(f"CSV requires unique headers including {sorted(required)}")
+        records = list(reader)
+    except csv.Error as exc:
+        raise ValueError(f"invalid CSV: {exc}") from None
     if any(None in r or any(v is None for v in r.values()) for r in records):
         raise ValueError("CSV row width does not match header width")
     prices = [r["close"] for r in records]
