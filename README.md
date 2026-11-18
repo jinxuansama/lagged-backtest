@@ -43,7 +43,9 @@ The strategy earns no 100→200 return: its first position starts at the second
 close and earns 200→300. Metrics include total return, annualized return and
 sample volatility, zero-risk-free Sharpe, maximum drawdown, and turnover.
 Annualization uses the explicitly assumed bar frequency (252 by default),
-not elapsed calendar time. Undefined Sharpe/volatility return JSON `null`.
+not elapsed calendar time. Undefined Sharpe/volatility and non-finite
+annualized metrics return JSON `null`. Price ratios and wealth outside the
+finite, positive floating-point range are rejected.
 
 `--output report.json` saves the full deterministic report; `--periods-per-year`
 changes the frequency assumption. CLI exits 0 on success and 2 on invalid input.

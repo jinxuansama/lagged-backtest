@@ -1,6 +1,15 @@
+import contextlib
+import io
+import json
+import math
+from pathlib import Path
+import statistics
+import tempfile
 import unittest
+from unittest.mock import patch
 
-from lagged_backtest.core import backtest, moving_average_signals
+from lagged_backtest.cli import main
+from lagged_backtest.core import backtest, from_csv, moving_average_signals
 
 
 class BacktestTests(unittest.TestCase):
@@ -30,6 +39,52 @@ class BacktestTests(unittest.TestCase):
         r = backtest(self.dates, [100, 90, 110, 121], [1]*4, lag=1, cost_bps=0)
         self.assertAlmostEqual(r["rows"][-1]["equity"], 1.21)
         self.assertAlmostEqual(r["metrics"]["max_drawdown"], -0.1)
+
+    def test_tiny_positive_price_ratio_preserves_equity_and_holdings(self):
+        r = backtest(self.dates[:3], [1, 1e-17, 1], [1]*3, lag=1, cost_bps=100)
+        self.assertTrue(math.isclose(r["rows"][1]["equity"], 0.99e-17, rel_tol=1e-15))
+        self.assertTrue(math.isclose(r["rows"][2]["equity"], 0.99, rel_tol=1e-15))
+        self.assertEqual(r["rows"][2]["turnover"], 0)
+
+    def test_tiny_positive_price_ratio_preserves_fractional_drift(self):
+        r = backtest(self.dates[:3], [1, 1e-17, 1e-17], [0.5, 1e-17, 0],
+                     lag=1, cost_bps=0)
+        self.assertEqual(r["rows"][2]["turnover"], 0)
+
+    def test_unrepresentable_adjacent_price_ratios_rejected(self):
+        for prices in ([1e-308, 1e308], [1e308, 1e-308]):
+            with self.subTest(prices=prices), self.assertRaisesRegex(ValueError, "price ratio"):
+                backtest(self.dates[:2], prices, [0]*2, cost_bps=0)
+
+    def test_unrepresentable_buy_hold_ratios_rejected(self):
+        for prices in ([1e-308, 1, 1e308], [1e308, 1, 1e-308]):
+            with self.subTest(prices=prices), self.assertRaisesRegex(ValueError, "buy-and-hold"):
+                backtest(self.dates[:3], prices, [0]*3, cost_bps=0)
+
+    def test_overflowing_annualized_metrics_are_null(self):
+        r = backtest(self.dates[:3], [1, 1e308, 1e308], [1]*3, lag=1, cost_bps=0)
+        self.assertEqual(r["rows"][-1]["equity"], 1e308)
+        self.assertIsNone(r["metrics"]["annualized_return"])
+        self.assertIsNone(r["metrics"]["annualized_volatility"])
+        self.assertTrue(math.isfinite(r["metrics"]["sharpe_zero_risk_free"]))
+        json.dumps(r, allow_nan=False)
+
+    def test_representable_deviation_survives_variance_overflow(self):
+        # Python 3.10 converts variance to float before taking its square root.
+        def variance_first_stdev(data):
+            return math.sqrt(statistics.variance(data))
+
+        for price in (1e200, 1e308):
+            with self.subTest(price=price), patch(
+                "lagged_backtest.core.statistics.stdev", side_effect=variance_first_stdev
+            ):
+                r = backtest(self.dates[:3], [1, price, price], [1]*3,
+                             lag=1, cost_bps=0, periods_per_year=1)
+                self.assertTrue(math.isclose(r["metrics"]["annualized_volatility"],
+                                             price / math.sqrt(2), rel_tol=1e-15))
+                self.assertAlmostEqual(r["metrics"]["sharpe_zero_risk_free"],
+                                       1 / math.sqrt(2))
+                json.dumps(r, allow_nan=False)
 
     def test_future_change_does_not_change_past(self):
         a_prices, b_prices = [100, 110, 120, 130], [100, 110, 120, 1]
@@ -62,6 +117,86 @@ class BacktestTests(unittest.TestCase):
     def test_lag_exceeds_history(self):
         r = backtest(self.dates, [1, 2, 3, 4], [1]*4, lag=10)
         self.assertEqual(r["metrics"]["total_return"], 0)
+
+
+class CsvInputTests(unittest.TestCase):
+    malformed_inputs = (
+        'date,close,signal\n2026-01-01,100,0\n2026-01-02,"10"1,1\n',
+        'date,close,signal\n2026-01-01,100,0\n2026-01-02,101,"1',
+        '"date"x,close,signal\n2026-01-01,100,0\n2026-01-02,101,1\n',
+    )
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.path = Path(directory.name) / "prices.csv"
+
+    def test_malformed_quoting_raises_contextual_value_error(self):
+        for content in self.malformed_inputs:
+            with self.subTest(content=content):
+                self.path.write_text(content, encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "invalid CSV"):
+                    from_csv(self.path)
+
+    def test_malformed_quoting_cli_exits_two_without_writing_report(self):
+        output = self.path.with_suffix(".json")
+        for content in self.malformed_inputs:
+            with self.subTest(content=content):
+                self.path.write_text(content, encoding="utf-8")
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    code = main([str(self.path), "--output", str(output)])
+                self.assertEqual(code, 2)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertIn("invalid CSV", stderr.getvalue())
+                self.assertFalse(output.exists())
+
+    def test_valid_quoted_and_multiline_fields_remain_supported(self):
+        for content in (
+            '"date","close","signal"\n"2026-01-01","100","0"\n"2026-01-02","101","1"\n',
+            'date,close,signal,notes\r\n2026-01-01,"100",0,"first, line\r\nsecond line"\r\n'
+            '2026-01-02,101,"1","a ""quoted"" note"\r\n',
+        ):
+            with self.subTest(content=content):
+                self.path.write_text(content, encoding="utf-8")
+                report = from_csv(self.path)
+                self.assertEqual([row["close"] for row in report["rows"]], [100, 101])
+                self.assertEqual([row["signal"] for row in report["rows"]], [0, 1])
+
+
+class CliNumericalTests(unittest.TestCase):
+    def run_prices(self, prices):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "prices.csv"
+            path.write_text("date,close,signal\n" + "".join(
+                f"2026-01-{i:02d},{price},1\n" for i, price in enumerate(prices, 1)),
+                encoding="utf-8")
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = main([str(path), "--lag", "1", "--cost-bps", "0"])
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_representable_extreme_prices_emit_strict_json(self):
+        for prices in ([1, 1e-17, 1], [1, 1e308, 1e308]):
+            with self.subTest(prices=prices):
+                code, stdout, stderr = self.run_prices(prices)
+                self.assertEqual(code, 0, stderr)
+                self.assertEqual(stderr, "")
+                report = json.loads(stdout, parse_constant=lambda value: self.fail(value))
+                self.assertEqual(report["rows"][-1]["equity"], prices[-1])
+
+    def test_unrepresentable_price_ratios_exit_two_without_json(self):
+        for prices, message in (
+            ([1e-308, 1e308], "price ratio"),
+            ([1e308, 1e-308], "price ratio"),
+            ([1e-308, 1, 1e308], "buy-and-hold"),
+            ([1e308, 1, 1e-308], "buy-and-hold"),
+        ):
+            with self.subTest(prices=prices):
+                code, stdout, stderr = self.run_prices(prices)
+                self.assertEqual(code, 2)
+                self.assertEqual(stdout, "")
+                self.assertIn(message, stderr)
 
 
 if __name__ == "__main__":
